@@ -1,0 +1,203 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Jhon Sebastian Villarreal"
+date: "28/8/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r eval=TRUE, message=FALSE, warning=FALSE, include=FALSE}
+#Set libraries and data
+library(caret); library(ggplot2); library(ggpubr); library(dplyr)
+training <- read.csv("D:/2 - CURSOS/Cursos Varios/online courses/Data Science Program/Practical Machine Learning/Course project/pml-training.csv")
+testing <- read.csv("D:/2 - CURSOS/Cursos Varios/online courses/Data Science Program/Practical Machine Learning/Course project/pml-testing.csv")
+```
+
+## Introduction
+The present project propose a machine learning model to predict the way a sample of participants does barbell lifts, using data the Weight Lifting Exercises (WLE) Dataset collected by the [Groupware research team](http://groupware.les.inf.puc-rio.br/har#weight_lifting_exercises), measure with accelerometers on 4 parts of the body: the belt, arm, forearm and dumbbell. 
+The document is divided in three sections: One first section for the preprocessing of the training data using Principal Component Analysis, followed by the estimation of a random forest model and a GBM model to select the most accurate; and the final section predicting the class of 20 observations using the selected model.
+
+### 1. Preprocessing
+The variable we are trying to predict is the "classe" variable from the WLE dataset. We can see below that this variable has imbalanced levels in the training data, for which the most frequent one corresponds to the type "A", also refer as the correct way to perform the exercise. The other levels correspond to 4 different incorrect ways of performance.
+```{r echo=FALSE, fig.align='center', fig.show='asis', message=FALSE, warning=FALSE}
+df <- training %>%
+  group_by(classe) %>%
+  summarise(counts = n())
+bar_classe <- ggplot(df, aes(x = classe, y = counts)) + geom_bar(fill = "lightblue", stat = "identity") + geom_text(aes(label = counts), vjust = -0.3) + theme_pubclean()
+bar_classe
+```
+
+In the dataset, some of the variables are available for every moment a participant does the exercise no matter the type of performance, while the rest are conditioned to the time a new window is presented, so they report a missing value for every time there is not new window. 
+
+As the algorithm of the present project focus on predict how well a person does the exercise, this second type of variables could skew the parameters, because they do not have a counterfactual information to be compare with in the moments where there is not a new window. For this reason, it was decided not to involve these variables in the training data, while just select the dummy variable indicating the presence of a new window. If this variable results relevant, it could be that the presence of a new window and its underlying variables influence the performance prediction. 
+
+This selection process let us with 13 performance measures for every part of the body. 
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+#belt_new_window
+data.frame(training[,12:36])
+#arm_new_window
+data.frame(c(training[,50:59], training[,69:83])))
+#dumbbell_new_window
+data.frame(c(training[,87:101], training[,103:112]))
+#forearm_new_window
+data.frame(c(training[,125:139], training[,141:150])
+          
+training <- training[,-(c(12:36,50:59,69:83,87:101,103:112,125:139,141:150))]
+#60 variables in total
+```
+
+Also, the dataset recognizes the "new window" and "classe" variables as characters, so we must change their structure in order to avoid any estimation problem related with this issue.
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+#Incorrect variable types
+str(c(training$new_window, training$classe)) #Recognized as character
+```
+
+We correct their structure to the real one: "new window" as dummy and "classe" as factor
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+#Changing to the correct variable types
+#New window
+dummies <- dummyVars(classe ~ new_window, data = training)
+dummy <- predict(dummies, newdata = training)
+training$new_window <- dummy[,2]
+#Classe
+training$classe <- as.factor(training$classe)
+str(training$new_window); str(training$classe)
+```
+
+With the number of predictors have been reduced, we can build the prediction algorithm. For this project, the preprocessing will be accomplished throught Principal Component Analysis (PCA), in order to reduce the variables to components containing most of the variability of the performance measures for every part of the body.For this propose, we first observe the correlation between the selected variables in the training dataset. 
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+M <- abs(cor(training[,7:59]))
+diag(M) <- 0
+which(M > 0.7, arr.ind = TRUE)
+```
+
+The correlations tell us that most of the measurements corresponding to a same part of the body, but not all, are correlated by more than 70%, so their variability could be join by some principal variables that explain most of the performance of a specific part of the body. These variables are the ones that are intended to be approximated by the PCA.
+ 
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+#BELT
+belt <- training[,8:20]; beltpca <- prcomp(belt); belt_pr <- summary(beltpca)
+#ARM
+arm <- training[,21:33]; armpca <- prcomp(arm); arm_pr <- summary(armpca)
+#DUMBBELL
+dbell <- training[,34:46]; dbellpca <- prcomp(dbell); dbell_pr <- summary(dbellpca)
+#FOREARM
+farm <- training[,47:59]; farmpca <- prcomp(farm); farm_pr <- summary(farmpca)
+```
+
+we are looking for components containing 80% of the variability in every case, assuming this quantity is enough to train the model and predict the classe variable. For this, we must observe the importance of every component and select those components that a cumulative proportion of variance equal or greater than 80%.
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+#Belt PCAs importance
+belt_pr$importance[3,]
+#Arm PCAs importance
+arm_pr$importance[3,]
+#Dumbbell PCAs importance
+dbell_pr$importance[3,]
+#Forearm PCAs importance
+farm_pr$importance[3,]
+```
+
+According to the components importance, the first two components of every group explain the 80% of the variability of what we call "body part performance", except for the forearm, for which 80% of variability is reached with the first three components.
+
+we select these components and the new window dummy to be the training predictors.
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+pr_belt <- data.frame( belt1 = belt_pr$x[,1], belt2 = belt_pr$x[,2])
+pr_arm <- data.frame(arm1 = arm_pr$x[,1], arm2 = arm_pr$x[,2])
+pr_dbel <- data.frame(dbel1 = dbell_pr$x[,1], dbel2 = dbell_pr$x[,2])
+pr_farm <- data.frame(farm1 = farm_pr$x[,1], farm2 = farm_pr$x[,2], farm3 = farm_pr$x[,3])
+new_training <- data.frame(new_window = training$new_window, pr_belt, pr_arm, pr_dbel, pr_farm, classe = training$classe)
+```
+
+### 2. Machine Learning Model Estimation
+With the PCA preprocess above, we have obtain the predictors to estimate the machine learning model. We are going to choose between two prediction algorithms, a random forest and a Gradient Boosting Machine; but first, we opt to complement the PCAs with a 10-fold cross-validation. This will help us to control the imbalanced classes in the classe variable and to obtain a better training of the models.
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+set.seed(34567)
+#10-fold cross validation
+cross_v <- trainControl(method = "cv", number = 10)
+```
+
+With the cross validation accomplished, we proceed to train the models with the PCAs and the new window variable as predictors.
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+##Random Forest model
+set.seed(5432)
+modfit1 <- train(classe ~., data = new_training, method = "rf", trcontrol = cross_v)
+modfit1
+```
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+## GBM model 
+modfit2 <- train(y = training$classe, x = new_training[,-11], method = "gbm", distribution = "multinomial", trControl = cross_v, verbose = FALSE)
+modfit2
+```
+
+## 3. Predicting the testing data.
+The final model selected with the random forest train gives an accuracy rate of 96%, while the GBM train ends with an accuracy rate of 85%. Based in this indicator, we select the random forest model to predict the 20 observations of the testing data, but first, we should applied the same preprocessing to this data. First, we select the variables:
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+testing <- testing[,-(c(12:36,50:59,69:83,87:101,103:112,125:139,141:150))]
+```
+
+Then, we transform the "new_window" predictor to dummy:
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+testing$new_window[testing$new_window == "no"] <- 0
+testing$new_window[testing$new_window == "yes"] <- 1
+testing$new_window <- as.numeric(testing$new_window)
+```
+
+Now, we predict the principal components for this data using the estimated parameters in the training data preprocessing.
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+#belt
+belttest <- predict(beltpca, newdata = testing)
+testpr_belt <- data.frame(belt1 = belttest[,1], belt2 = belttest[,2])
+#arm
+armtest <- predict(armpca, newdata = testing)
+testpr_arm <- data.frame(arm1 = armtest[,1], arm2 = armtest[,2])
+#dumbbell 
+dbelltest <- predict(dbellpca, newdata = testing)
+testpr_dbell <- data.frame(dbel1 = dbelltest[,1], dbel2 = dbelltest[,2])
+#forearm
+farmtest <- predict(farmpca, newdata = testing)
+testpr_farm <- data.frame(farm1 = farmtest[,1], farm2 = farmtest[,2], farm3 = farmtest[,3] )
+```
+
+Finally, we construct the new testing dataset and predict the exercise type. At the end, if we also do the prediction with the GBM model, this results with 5 different classifications when comparing with the random forest model. 
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+new_testing <- data.frame(new_window = testing$new_window, testpr_belt, testpr_arm, testpr_dbell, testpr_farm)
+
+#Predict with Random Forest model
+rf_pred <- predict(modfit1, newdata = new_testing)
+data.frame(testing$problem_id, rf_pred)
+
+#Predict with GBM model
+gbm_pred <- predict(modfit2, newdata = new_testing)
+which(rf_pred != gbm_pred, arr.ind = TRUE)
+
+different <- rf_pred != gbm_pred
+predictions <- data.frame(rf_pred, gbm_pred, different)
+```
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+#RF GBM Are different?
+#B	A	TRUE		
+#A	A	FALSE		
+#B	A	TRUE		
+#A	A	FALSE		
+#A	A	FALSE		
+#E	E	FALSE		
+#D	D	FALSE		
+#B	B	FALSE		
+#A	A	FALSE		
+#A	A	FALSE
+#B	A	TRUE		
+#C	C	FALSE		
+#B	E	TRUE		
+#A	A	FALSE		
+#E	E	FALSE		
+#E	E	FALSE		
+#A	A	FALSE		
+#B	B	FALSE		
+#B	A	TRUE		
+#B	B	FALSE	
+```
